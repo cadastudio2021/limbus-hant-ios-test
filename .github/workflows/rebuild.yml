@@ -1,0 +1,70 @@
+name: 重打語言包
+
+on:
+  schedule:
+    - cron: "0 4 * * *"      # 每日 12:00 台灣時間
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "上游沒更新也強制重打"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rebuild
+  cancel-in-progress: false
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 建置
+        id: build
+        run: |
+          set -o pipefail
+          python tools/build.py ${{ inputs.force && '--force' || '' }} 2>&1 | tee build.log
+          if grep -q "BUILD_CHANGED=1" build.log; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 提交
+        if: steps.build.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json localize_kr.zip sources.json
+          git diff --staged --quiet && exit 0
+          GH=$(python -c "import json;print(json.load(open('sources.json'))['ghcruise'])")
+          LTM=$(python -c "import json;print(json.load(open('sources.json'))['ltm'])")
+          git commit -m "build: 重打語言包 (ghcruise $GH / LTM $LTM)"
+          git push
+
+      - name: 清 jsDelivr 快取
+        if: steps.build.outputs.changed == 'true'
+        run: |
+          B="https://purge.jsdelivr.net/gh/${{ github.repository }}@master"
+          for f in manifest.json localize_kr.zip; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$B/$f")
+            echo "purge $f -> HTTP $code"
+          done
+
+      - name: 摘要
+        if: always()
+        run: |
+          {
+            echo "## 建置結果"
+            echo '```'
+            cat build.log 2>/dev/null || echo "(無輸出)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
